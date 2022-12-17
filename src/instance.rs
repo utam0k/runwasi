@@ -1,24 +1,32 @@
+use std::fs;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use containerd_shim_wasm::sandbox::error::Error;
 use containerd_shim_wasm::sandbox::exec;
 use containerd_shim_wasm::sandbox::oci;
 use containerd_shim_wasm::sandbox::{EngineGetter, Instance, InstanceConfig};
+use libcontainer::container::builder::ContainerBuilder;
+use libcontainer::syscall::syscall::create_syscall;
 use log::{debug, error};
 use wasmtime::{Engine, Linker, Module, Store};
 use wasmtime_wasi::{sync::file::File as WasiFile, WasiCtx, WasiCtxBuilder};
+
+use crate::executor::WasmtimeExecutor;
 
 use super::error::WasmtimeError;
 use super::oci_wasmtime;
 
 type ExitCode = (Mutex<Option<(u32, DateTime<Utc>)>>, Condvar);
 pub struct Wasi {
+    id: String,
+
     exit_code: Arc<ExitCode>,
     engine: wasmtime::Engine,
 
@@ -137,9 +145,10 @@ pub fn prepare_module(
 
 impl Instance for Wasi {
     type E = wasmtime::Engine;
-    fn new(_id: String, cfg: Option<&InstanceConfig<Self::E>>) -> Self {
+    fn new(id: String, cfg: Option<&InstanceConfig<Self::E>>) -> Self {
         let cfg = cfg.unwrap(); // TODO: handle error
         Wasi {
+            id,
             exit_code: Arc::new((Mutex::new(None), Condvar::new())),
             engine: cfg.get_engine(),
             stdin: cfg.get_stdin().unwrap_or_default(),
@@ -149,11 +158,35 @@ impl Instance for Wasi {
             pidfd: Arc::new(Mutex::new(None)),
         }
     }
+
     fn start(&self) -> Result<u32, Error> {
-        let engine = self.engine.clone();
+        println!("in start");
+        log::error!("in start");
+
         let stdin = self.stdin.clone();
         let stdout = self.stdout.clone();
         let stderr = self.stderr.clone();
+
+        let syscall = create_syscall();
+        let mut container = ContainerBuilder::new(
+            self.id.clone(),
+            syscall.as_ref(),
+            vec![Box::new(WasmtimeExecutor {
+                engine: self.engine.clone(),
+                stdin,
+                stdout,
+                stderr,
+            })],
+        )
+        .as_init(&self.bundle)
+        .with_systemd(false)
+        .build()?;
+        container.start()?;
+
+        return Ok(container.pid().unwrap().as_raw() as u32);
+
+        // TODO
+        let engine = self.engine.clone();
 
         debug!("starting instance");
         let mut linker = Linker::new(&engine);
