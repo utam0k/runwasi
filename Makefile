@@ -41,6 +41,10 @@ load: target/wasm32-wasi/$(TARGET)/img.tar
 bin/kind: test/k8s/Dockerfile
 	$(DOCKER_BUILD) --output=bin/ -f test/k8s/Dockerfile --target=kind .
 
+test/unit:
+	for bin in $(shell cargo test --no-run --message-format=json | jq -r "select(.profile.test == true) | .filenames[]"); do\
+		sudo -- "$$bin";\
+	done
 
 test/k8s/_out/img: test/k8s/Dockerfile Cargo.toml Cargo.lock $(shell find . -type f -name '*.rs')
 	mkdir -p $(@D) && $(DOCKER_BUILD) -f test/k8s/Dockerfile --iidfile=$(@) --load  .
@@ -58,3 +62,4 @@ test/k8s/deploy: test/k8s/cluster
 .PHONY: test/k8s/clean
 test/k8s/clean:
 	kind delete cluster --name $(KIND_CLUSTER_NAME)
+
