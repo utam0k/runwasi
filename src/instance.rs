@@ -1,6 +1,4 @@
-use std::fs;
 use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
@@ -160,32 +158,10 @@ impl Instance for Wasi {
     }
 
     fn start(&self) -> Result<u32, Error> {
-        println!("in start");
-        log::error!("in start");
-
         let stdin = self.stdin.clone();
         let stdout = self.stdout.clone();
         let stderr = self.stderr.clone();
 
-        let syscall = create_syscall();
-        let mut container = ContainerBuilder::new(
-            self.id.clone(),
-            syscall.as_ref(),
-            vec![Box::new(WasmtimeExecutor {
-                engine: self.engine.clone(),
-                stdin,
-                stdout,
-                stderr,
-            })],
-        )
-        .as_init(&self.bundle)
-        .with_systemd(false)
-        .build()?;
-        container.start()?;
-
-        return Ok(container.pid().unwrap().as_raw() as u32);
-
-        // TODO
         let engine = self.engine.clone();
 
         debug!("starting instance");
@@ -213,53 +189,99 @@ impl Instance for Wasi {
                 "module does not have a wasi start function".to_string(),
             ))?;
 
-        debug!("starting wasi instance");
+        // Create a container
+        let syscall = create_syscall();
+        let mut container = ContainerBuilder::new(
+            self.id.clone(),
+            syscall.as_ref(),
+            vec![Box::new(WasmtimeExecutor { f, store })],
+        )
+        .as_init(&self.bundle)
+        .with_systemd(false)
+        .build()?;
 
-        let cg = oci::get_cgroup(&spec)?;
+        // TODO:
+        container.start()?;
 
-        oci::setup_cgroup(cg.as_ref(), &spec)
-            .map_err(|e| Error::Others(format!("error setting up cgroups: {}", e)))?;
+        return Ok(container.pid().unwrap().as_raw() as u32);
 
-        let res = unsafe { exec::fork(Some(cg.as_ref())) }?;
-        match res {
-            exec::Context::Parent(tid, pidfd) => {
-                let mut lr = self.pidfd.lock().unwrap();
-                *lr = Some(pidfd.clone());
-
-                debug!("started wasi instance with tid {}", tid);
-
-                let code = self.exit_code.clone();
-
-                let _ = thread::spawn(move || {
-                    let (lock, cvar) = &*code;
-                    let status = match pidfd.wait() {
-                        Ok(status) => status,
-                        Err(e) => {
-                            error!("error waiting for pid {}: {}", tid, e);
-                            cvar.notify_all();
-                            return;
-                        }
-                    };
-
-                    debug!("wasi instance exited with status {}", status.status);
-                    let mut ec = lock.lock().unwrap();
-                    *ec = Some((status.status, Utc::now()));
-                    drop(lock);
-                    cvar.notify_all();
-                });
-                Ok(tid)
-            }
-            exec::Context::Child => {
-                // child process
-
-                // TODO: How to get exit code?
-                // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
-                let _ret = match f.call(&mut store, &mut [], &mut []) {
-                    Ok(_) => std::process::exit(0),
-                    Err(_) => std::process::exit(137),
-                };
-            }
-        }
+        // let engine = self.engine.clone();
+        // let stdin = self.stdin.clone();
+        // let stdout = self.stdout.clone();
+        // let stderr = self.stderr.clone();
+        //
+        // debug!("starting instance");
+        // let mut linker = Linker::new(&engine);
+        //
+        // wasmtime_wasi::add_to_linker(&mut linker, |s| s)
+        //     .map_err(|err| Error::Others(format!("error adding to linker: {}", err)))?;
+        //
+        // debug!("preparing module");
+        // let spec = load_spec(self.bundle.clone())?;
+        // let m = prepare_module(engine.clone(), &spec, stdin, stdout, stderr)
+        //     .map_err(|e| Error::Others(format!("error setting up module: {}", e)))?;
+        //
+        // let mut store = Store::new(&engine, m.0);
+        //
+        // debug!("instantiating instnace");
+        // let i = linker
+        //     .instantiate(&mut store, &m.1)
+        //     .map_err(|err| Error::Others(format!("error instantiating module: {}", err)))?;
+        //
+        // debug!("getting start function");
+        // let f = i
+        //     .get_func(&mut store, "_start")
+        //     .ok_or(Error::InvalidArgument(
+        //         "module does not have a wasi start function".to_string(),
+        //     ))?;
+        //
+        // debug!("starting wasi instance");
+        //
+        // let cg = oci::get_cgroup(&spec)?;
+        //
+        // oci::setup_cgroup(cg.as_ref(), &spec)
+        //     .map_err(|e| Error::Others(format!("error setting up cgroups: {}", e)))?;
+        //
+        // let res = unsafe { exec::fork(Some(cg.as_ref())) }?;
+        // match res {
+        //     exec::Context::Parent(tid, pidfd) => {
+        //         let mut lr = self.pidfd.lock().unwrap();
+        //         *lr = Some(pidfd.clone());
+        //
+        //         debug!("started wasi instance with tid {}", tid);
+        //
+        //         let code = self.exit_code.clone();
+        //
+        //         let _ = thread::spawn(move || {
+        //             let (lock, cvar) = &*code;
+        //             let status = match pidfd.wait() {
+        //                 Ok(status) => status,
+        //                 Err(e) => {
+        //                     error!("error waiting for pid {}: {}", tid, e);
+        //                     cvar.notify_all();
+        //                     return;
+        //                 }
+        //             };
+        //
+        //             debug!("wasi instance exited with status {}", status.status);
+        //             let mut ec = lock.lock().unwrap();
+        //             *ec = Some((status.status, Utc::now()));
+        //             drop(lock);
+        //             cvar.notify_all();
+        //         });
+        //         Ok(tid)
+        //     }
+        //     exec::Context::Child => {
+        //         // child process
+        //
+        //         // TODO: How to get exit code?
+        //         // This was relatively straight forward in go, but wasi and wasmtime are totally separate things in rust.
+        //         let _ret = match f.call(&mut store, &mut [], &mut []) {
+        //             Ok(_) => std::process::exit(0),
+        //             Err(_) => std::process::exit(137),
+        //         };
+        //     }
+        // }
     }
 
     fn kill(&self, signal: u32) -> Result<(), Error> {
@@ -290,6 +312,7 @@ impl Instance for Wasi {
     }
 
     fn wait(&self, channel: Sender<(u32, DateTime<Utc>)>) -> Result<(), Error> {
+        // return std::result::Result::Err(Error::Others("wait!".to_string()));
         let code = self.exit_code.clone();
         thread::spawn(move || {
             let (lock, cvar) = &*code;
