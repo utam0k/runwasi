@@ -31,4 +31,7 @@ load: target/wasm32-wasi/$(TARGET)/img.tar
 	sudo ctr -n $(CONTAINERD_NAMESPACE) image import --all-platforms $<
 
 unit_test:
-	cargo test --no-run --message-format=json | jq -r "select(.profile.test == true) | .filenames[]" | while read -r bin; do sudo "$bin"; done
+	for bin in $(shell cargo test --no-run --message-format=json | jq -r "select(.profile.test == true) | .filenames[]"); do\
+		sudo -- "$$bin";\
+	done
+
